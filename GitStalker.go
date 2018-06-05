@@ -4,13 +4,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/nareix/curl"
 	"log"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
+
+	"github.com/nareix/curl"
+	"github.com/remeh/sizedwaitgroup"
 )
 
 type Repository struct {
@@ -20,6 +22,8 @@ type Repository struct {
 
 var (
 	username *string  = flag.String("u", "", "github username")
+	shallow  *bool    = flag.Bool("s", false, "shallow clone/pull")
+	threads  *int     = flag.Int("t", 10, "number of goroutines to spawn")
 	keyword  []string = []string{"starred", "repos"}
 )
 
@@ -74,12 +78,17 @@ func action(key, fullname string) {
 	repoName := repoInfo[1]
 
 	exitCode := 0
-	_, err := os.Stat(repoDir+"/.git")
+	_, err := os.Stat(repoDir + "/.git")
 	if err == nil {
 		os.Chdir(repoDir)
 		log.Printf("repo '%s' already exists, try update.\n", repoDir)
-		c := command("git", "pull")
-		if err := c.Run(); err != nil {
+		var c *exec.Cmd
+		if *shallow {
+			c = command("git", "pull", "--depth=1")
+		} else {
+			c = command("git", "pull")
+		}
+		if err = c.Run(); err != nil {
 			log.Println(err)
 		}
 		return
@@ -91,7 +100,12 @@ func action(key, fullname string) {
 
 	url := fmt.Sprintf("https://github.com/%s/%s.git", repoUser, repoName)
 	log.Printf("git clone %s into %s", url, repoDir)
-	c := command("git", "clone", url, repoDir)
+	var c *exec.Cmd
+	if *shallow {
+		c = command("git", "clone", "--depth=1", "--shallow-submodules", "--single-branch", url, repoDir)
+	} else {
+		c = command("git", "clone", url, repoDir)
+	}
 	if err := c.Run(); err != nil {
 		if exiterr, ok := err.(*exec.ExitError); ok {
 			if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
@@ -119,6 +133,8 @@ func main() {
 		os.Setenv("PATH", path)
 	}
 
+	swg := sizedwaitgroup.New(*threads)
+
 	pwd, err := os.Getwd()
 	if err != nil {
 		log.Fatalln(err)
@@ -133,8 +149,14 @@ func main() {
 
 		for _, fullname := range items {
 			os.Chdir(pwd)
-			go action(key, fullname)
+			swg.Add()
+			go func() {
+				action(key, fullname)
+				defer swg.Done()
+			}()
 		}
 	}
+
+	swg.Wait()
 
 }
